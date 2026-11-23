@@ -1,0 +1,96 @@
+// sexprerr — what a reader refuses, and where.
+//
+// Every fault carries the line and the column of the byte it is about,
+// both counted from 1, so a caller prints `file:line:col: message`
+// without a second scan.  A column counts bytes, not characters: a
+// multi-byte UTF-8 sequence before the fault advances it by the length
+// of the sequence.
+
+// Why a reader refused its input.
+//
+// ```novo
+// use sexprerr
+//
+// fn main() [io]
+//     println(sexprerr.code_of(SexprUnbalancedClose(3, 7)))   // unbalanced-close
+// ```
+pub enum SexprFault
+    // A quoted string opened at this line and column has no closing
+    // quote before the input ends.
+    SexprUnterminatedString(line: Int, col: Int)
+    // A `)` with no `(` to close, at this line and column.
+    SexprUnbalancedClose(line: Int, col: Int)
+    // A `(` opened at this line and column is never closed.
+    SexprUnclosedList(line: Int, col: Int)
+    // Lists nested deeper than the limit, first exceeded at this line
+    // and column.
+    SexprTooDeep(line: Int, col: Int, limit: Int)
+    // The input holds no form at all: it is empty or only white space.
+    SexprEmpty
+    // A second top-level form starts at this line and column.  A file of
+    // KiCad's is one form, and anything after it is a fault.
+    SexprTrailing(line: Int, col: Int)
+
+impl Error for SexprFault
+    // The one-line report: the position and what was wrong.
+    fn message(self) -> Str
+        match self
+            SexprUnterminatedString(l, c) => "${l}:${c}: the quoted string opened here is never closed"
+            SexprUnbalancedClose(l, c)    => "${l}:${c}: a `)` closes nothing"
+            SexprUnclosedList(l, c)       => "${l}:${c}: the list opened here is never closed"
+            SexprTooDeep(l, c, limit)     => "${l}:${c}: lists nest deeper than ${limit} levels"
+            SexprEmpty                    => "the input holds no form"
+            SexprTrailing(l, c)           => "${l}:${c}: a second form follows the first"
+
+// The line the fault is about, from 1, or 0 for a fault with no position.
+//
+// ```novo
+// use sexprerr
+//
+// fn main() [io]
+//     println("${sexprerr.line_of(SexprUnbalancedClose(3, 7))}")   // 3
+// ```
+pub fn line_of(f: SexprFault) -> Int []
+    match f
+        SexprUnterminatedString(l, _) => l
+        SexprUnbalancedClose(l, _)    => l
+        SexprUnclosedList(l, _)       => l
+        SexprTooDeep(l, _, _)         => l
+        SexprTrailing(l, _)           => l
+        SexprEmpty                    => 0
+
+// The column the fault is about, from 1, or 0 for a fault with no
+// position.
+//
+// ```novo
+// use sexprerr
+//
+// fn main() [io]
+//     println("${sexprerr.col_of(SexprUnbalancedClose(3, 7))}")   // 7
+// ```
+pub fn col_of(f: SexprFault) -> Int []
+    match f
+        SexprUnterminatedString(_, c) => c
+        SexprUnbalancedClose(_, c)    => c
+        SexprUnclosedList(_, c)       => c
+        SexprTooDeep(_, c, _)         => c
+        SexprTrailing(_, c)           => c
+        SexprEmpty                    => 0
+
+// A short stable name for the kind of fault, for a caller that branches
+// on it.
+//
+// ```novo
+// use sexprerr
+//
+// fn main() [io]
+//     println(sexprerr.code_of(SexprEmpty))   // empty
+// ```
+pub fn code_of(f: SexprFault) -> Str []
+    match f
+        SexprUnterminatedString(_, _) => "unterminated-string"
+        SexprUnbalancedClose(_, _)    => "unbalanced-close"
+        SexprUnclosedList(_, _)       => "unclosed-list"
+        SexprTooDeep(_, _, _)         => "too-deep"
+        SexprEmpty                    => "empty"
+        SexprTrailing(_, _)           => "trailing"

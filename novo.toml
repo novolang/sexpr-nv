@@ -1,0 +1,30 @@
+[package]
+name        = "sexpr-nv"
+version     = "0.1.0"
+description = "A reader and writer of S-expressions as KiCad writes them: lists, bare atoms and quoted strings with escapes, with the line and column of every node.  A pull scanner walks a board file of several megabytes without allocating per node, and a reader builds an arena of numbered nodes over the same bytes.  The writer quotes the way KiCad does and prints in KiCad's indentation."
+license     = "Apache-2.0"
+
+# `experimental` because no program outside this repository has used the
+# package yet.
+stability   = "experimental"
+
+# `core`: arithmetic over bytes the caller already holds.  Every public
+# function declares `[]`.  A file is read by the caller and the bytes
+# are handed in; the text comes back as a `Str` for the caller to write.
+layer       = "core"
+
+category    = "encoding"
+
+tags        = ["sexpr", "s-expression", "kicad", "kicad_pcb", "kicad_sch", "netlist", "parser", "writer"]
+repository  = "https://github.com/novolang/sexpr-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.26.1"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Reading and writing the S-expressions of a KiCad board, schematic and netlist"
+
+[dependencies]
+# None.  Every function is arithmetic over `Bytes` and `Str`.

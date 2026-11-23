@@ -1,0 +1,175 @@
+// sexpr_write_tests — quoting, the two layouts, and the round trip from
+// text to a tree to a value and back to the same text.
+
+use std.test
+use std.bytes
+use std.str
+use sexprtree
+use sexprwrite
+
+fn b(s: Str) -> Bytes
+    bytes.from_str(s)
+
+fn atom(s: Str) -> SexprValue
+    SxAtom(s)
+
+fn text(s: Str) -> SexprValue
+    SxString(s)
+
+// A tree of `s`, or a failed test and a one-node tree.
+fn tree_of(s: Str) -> sexprtree.SexprTree
+    match sexprtree.parse(b(s))
+        Ok(t)  => t
+        Err(e) =>
+            test.fail(e.message())
+            sexprtree.parse(b("(x)"))!
+
+// ── Quoting ─────────────────────────────────────────────────────────
+
+@test
+fn test_a_string_is_quoted_and_its_specials_escaped()
+    test.assert_eq(sexprwrite.quote("abc"), "\"abc\"")
+    test.assert_eq(sexprwrite.quote(""), "\"\"")
+    test.assert_eq(sexprwrite.quote("a\"b"), "\"a\\\"b\"")
+    test.assert_eq(sexprwrite.quote("a\\b"), "\"a\\\\b\"")
+    test.assert_eq(sexprwrite.quote("a\nb\rc\td"), "\"a\\nb\\rc\\td\"")
+    test.assert_eq(sexprwrite.quote("\u{1}\u{1f}"), "\"\\x01\\x1F\"")
+    test.assert_eq(sexprwrite.quote("Ω (10k)"), "\"Ω (10k)\"")
+
+@test
+fn test_what_quote_writes_unquote_reads_back()
+    let hostile = "a\"b\\c\nd\re\tf\u{1}g\u{7f}Ω"
+    let q = sexprwrite.quote(hostile)
+    let inner = bytes.slice(b(q), 1, bytes.len(b(q)) - 1)
+    test.assert_eq(sexprtree.unquote(inner), hostile)
+
+@test
+fn test_an_atom_is_bare_unless_it_cannot_stand_so()
+    test.assert(sexprwrite.is_bare("F.Cu"))
+    test.assert(sexprwrite.is_bare("-0.5"))
+    test.assert(sexprwrite.is_bare("#PWR01"))
+    test.assert(not sexprwrite.is_bare(""))
+    test.assert(not sexprwrite.is_bare("a b"))
+    test.assert(not sexprwrite.is_bare("a(b"))
+    test.assert(not sexprwrite.is_bare("a)"))
+    test.assert(not sexprwrite.is_bare("a\"b"))
+    test.assert(not sexprwrite.is_bare("a\tb"))
+
+@test
+fn test_an_atom_that_cannot_be_bare_is_written_as_a_string()
+    test.assert_eq(sexprwrite.write(atom("a b")), "\"a b\"")
+    test.assert_eq(sexprwrite.write(atom("")), "\"\"")
+    test.assert_eq(sexprwrite.write(atom("ok")), "ok")
+    test.assert_eq(sexprwrite.write(text("ok")), "\"ok\"")
+
+@test
+fn test_numbers_are_written_in_the_form_that_reads_back()
+    test.assert_eq(sexprwrite.write(sexprwrite.int_atom(-42)), "-42")
+    test.assert_eq(sexprwrite.write(sexprwrite.float_atom(12.5)), "12.5")
+    test.assert_eq(sexprwrite.write(sexprwrite.float_atom(100.0)), "100")
+    let t = tree_of("(" + sexprwrite.write(sexprwrite.float_atom(0.1)) + ")")
+    test.assert_eq(sexprtree.as_float(t, 1) ?? 0.0, 0.1)
+
+// ── The compact layout ──────────────────────────────────────────────
+
+@test
+fn test_the_compact_layout_is_one_line_with_single_spaces()
+    let v = SxList([atom("footprint"), text("R"), SxList([atom("at"), atom("1"), atom("2.5")]), SxList([])])
+    test.assert_eq(sexprwrite.write(v), "(footprint \"R\" (at 1 2.5) ())")
+
+// ── KiCad's layout ──────────────────────────────────────────────────
+
+@test
+fn test_a_list_of_leaves_stays_on_one_line_in_the_kicad_layout()
+    let v = SxList([atom("layers"), text("F.Cu"), text("F.Mask")])
+    test.assert_eq(sexprwrite.write_pretty(v, "\t"), "(layers \"F.Cu\" \"F.Mask\")")
+
+@test
+fn test_a_list_of_lists_puts_each_child_on_its_own_indented_line()
+    let at = SxList([atom("at"), atom("1"), atom("2")])
+    let layer = SxList([atom("layer"), text("F.Cu")])
+    let v = SxList([atom("footprint"), text("R1"), at, layer])
+    test.assert_eq(sexprwrite.write_pretty(v, "\t"), "(footprint \"R1\"\n\t(at 1 2)\n\t(layer \"F.Cu\")\n)")
+    test.assert_eq(sexprwrite.write_pretty(v, "  "), "(footprint \"R1\"\n  (at 1 2)\n  (layer \"F.Cu\")\n)")
+
+@test
+fn test_an_atom_after_the_first_child_list_goes_on_its_own_line()
+    let v = SxList([atom("pad"), SxList([atom("at"), atom("0")]), atom("locked")])
+    test.assert_eq(sexprwrite.write_pretty(v, "\t"), "(pad\n\t(at 0)\n\tlocked\n)")
+
+@test
+fn test_a_list_that_begins_with_a_list_has_no_head_atoms()
+    let v = SxList([SxList([atom("a")]), SxList([atom("b")])])
+    test.assert_eq(sexprwrite.write_pretty(v, " "), "(\n (a)\n (b)\n)")
+
+@test
+fn test_nesting_indents_one_level_per_list()
+    let font = SxList([atom("font"), SxList([atom("size"), atom("1"), atom("1")])])
+    let effects = SxList([atom("effects"), font])
+    let v = SxList([atom("property"), text("Reference"), text("R1"), effects])
+    test.assert_eq(sexprwrite.write_pretty(v, "\t"),
+        "(property \"Reference\" \"R1\"\n\t(effects\n\t\t(font\n\t\t\t(size 1 1)\n\t\t)\n\t)\n)")
+
+@test
+fn test_a_leaf_alone_is_written_as_a_leaf_in_either_layout()
+    test.assert_eq(sexprwrite.write_pretty(atom("x"), "\t"), "x")
+    test.assert_eq(sexprwrite.write_pretty(text("x y"), "\t"), "\"x y\"")
+
+// ── Round trips ─────────────────────────────────────────────────────
+
+// A board in KiCad 8's layout: tabs, leading atoms on the head line.
+fn pretty_board() -> Str
+    str.join([
+        "(kicad_pcb\n",
+        "\t(version 20240108)\n",
+        "\t(generator \"pcbnew\")\n",
+        "\t(net 0 \"\")\n",
+        "\t(footprint \"Resistor_SMD:R_0603_1608Metric\"\n",
+        "\t\t(layer \"F.Cu\")\n",
+        "\t\t(at 148.59 100.33 90)\n",
+        "\t\t(property \"Reference\" \"R1\"\n",
+        "\t\t\t(at 0 -1.43 90)\n",
+        "\t\t\t(effects\n",
+        "\t\t\t\t(font\n",
+        "\t\t\t\t\t(size 1 1)\n",
+        "\t\t\t\t)\n",
+        "\t\t\t)\n",
+        "\t\t)\n",
+        "\t\t(pad \"1\" smd roundrect\n",
+        "\t\t\t(at -0.825 0)\n",
+        "\t\t\t(net 1 \"A \\\"quoted\\\" net\")\n",
+        "\t\t)\n",
+        "\t)\n",
+        ")"],
+    "")
+
+@test
+fn test_a_board_in_kicads_layout_is_written_back_byte_for_byte()
+    let t = tree_of(pretty_board())
+    let v = sexprwrite.from_tree(t, 0)
+    test.assert_eq_str(sexprwrite.write_pretty(v, "\t"), pretty_board())
+
+@test
+fn test_the_compact_form_of_a_tree_reads_back_as_the_same_tree()
+    let t = tree_of(pretty_board())
+    let flat = sexprwrite.write(sexprwrite.from_tree(t, 0))
+    let t2 = tree_of(flat)
+    test.assert_eq(sexprtree.count(t2), sexprtree.count(t))
+    test.assert_eq_str(sexprwrite.write(sexprwrite.from_tree(t2, 0)), flat)
+    test.assert_eq_str(sexprwrite.write_pretty(sexprwrite.from_tree(t2, 0), "\t"), pretty_board())
+
+@test
+fn test_a_subtree_is_converted_alone()
+    let t = tree_of("(a (b \"c d\") e)")
+    test.assert_eq_str(sexprwrite.write(sexprwrite.from_tree(t, 2)), "(b \"c d\")")
+    test.assert_eq_str(sexprwrite.write(sexprwrite.from_tree(t, 4)), "\"c d\"")
+    test.assert_eq_str(sexprwrite.write(sexprwrite.from_tree(t, 1)), "a")
+
+@test
+fn test_a_value_edited_after_reading_writes_the_edit()
+    let t = tree_of("(footprint \"R1\" (at 1 2))")
+    let at = sexprtree.find(t, 0, "at")
+    let moved = SxList([atom("at"), sexprwrite.float_atom(10.5), sexprwrite.int_atom(20)])
+    let v = SxList([atom("footprint"), text("R1"), moved])
+    test.assert_eq_str(sexprwrite.write(v), "(footprint \"R1\" (at 10.5 20))")
+    test.assert(at > 0)

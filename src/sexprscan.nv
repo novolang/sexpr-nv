@@ -1,0 +1,271 @@
+// sexprscan — a pull scanner over the bytes of an S-expression.
+//
+// The grammar is the one KiCad writes in `.kicad_pcb`, `.kicad_sch`,
+// `.kicad_sym` and the `kicadsexpr` netlist.  There are four kinds of
+// token.
+//
+//   `(`               opens a list
+//   `)`               closes the innermost open list
+//   a quoted string   from `"` to the next `"` that no backslash
+//                     escapes; the token covers both quotes
+//   a bare atom       a run of bytes that is not white space, not a
+//                     parenthesis and not a quote
+//
+// White space is every byte up to and including 0x20.  There are no
+// comments: a `#` is an atom byte, as it is in `#PWR01` and in the hex
+// colours some libraries write.
+//
+// A token is four numbers and a kind, so the scan allocates nothing for
+// a token that is not a fault.  The caller owns the bytes and reads a
+// token's text by slicing `from..to`; `sexprtree` shows how a quoted
+// string is unescaped.  Nothing here builds a tree, which is what lets
+// a board file of several megabytes be walked in the space of the file
+// and a few integers.
+//
+// Lines and columns count from 1.  A line ends at LF, so a CRLF file
+// has the same line numbers as an LF one.  A column counts bytes from
+// the start of the line.
+
+use std.bytes
+use sexprerr
+
+// The kind of a token that opens a list.
+pub const TOK_OPEN = 0
+
+// The kind of a token that closes a list.
+pub const TOK_CLOSE = 1
+
+// The kind of a bare atom.
+pub const TOK_ATOM = 2
+
+// The kind of a quoted string.
+pub const TOK_STRING = 3
+
+// The kind answered once the input is used up and every list is closed.
+pub const TOK_END = 4
+
+// One token: its kind and where it lies.
+//
+// `from` and `to` are byte offsets, `to` one past the last byte.  For a
+// quoted string they include both quotes.  `line` and `col` are those of
+// the first byte.
+//
+// ```novo
+// use std.bytes
+// use sexprscan
+//
+// fn main() [io]
+//     var sc = sexprscan.scanner(bytes.from_str("(a)"), 64)
+//     match sexprscan.next(var sc)
+//         Ok(t)  => println("${t.kind} ${t.from} ${t.to}")   // 0 0 1
+//         Err(e) => println(e.message())
+// ```
+pub @value
+struct SexprToken
+    kind: Int
+    from: Int
+    to: Int
+    line: Int
+    col: Int
+
+// A scanner's position in its input, and the lists it has open.
+//
+// A caller treats it as opaque and passes it as `var` to `next`.
+pub struct SexprScanner
+    src: Bytes
+    var pos: Int
+    var line: Int
+    var line_start: Int
+    limit: Int
+    // How many lists are open.  The two lists below hold the line and
+    // the column of each open parenthesis in their first `open` places,
+    // innermost last, for the fault that names the list that was never
+    // closed.  A place above `open` is stale and is overwritten by the
+    // next list that opens.
+    var open: Int
+    var open_lines: [Int]
+    var open_cols: [Int]
+
+// A scanner at the start of `src`.  `max_depth` is the deepest list
+// nesting it accepts; KiCad's own files nest a dozen levels.
+//
+// ```novo
+// use std.bytes
+// use sexprscan
+//
+// fn main() [io]
+//     let sc = sexprscan.scanner(bytes.from_str("()"), 64)
+//     println("${sexprscan.depth(sc)}")   // 0
+// ```
+pub fn scanner(src: Bytes, max_depth: Int) -> SexprScanner []
+    var a: [Int] = []
+    var b: [Int] = []
+    SexprScanner { src: src,
+        pos: 0,
+        line: 1,
+        line_start: 0,
+        limit: max_depth,
+        open: 0,
+        open_lines: a,
+        open_cols: b }
+
+// How many lists the scanner has open.
+//
+// ```novo
+// use std.bytes
+// use sexprscan
+//
+// fn main() [io]
+//     var sc = sexprscan.scanner(bytes.from_str("((a"), 64)
+//     let _ = sexprscan.next(var sc)
+//     let _ = sexprscan.next(var sc)
+//     println("${sexprscan.depth(sc)}")   // 2
+// ```
+pub fn depth(sc: SexprScanner) -> Int []
+    sc.open
+
+// The byte at `i`, or -1 past the end.
+fn at(src: Bytes, i: Int) -> Int
+    bytes.byte_at(src, i) ?? -1
+
+// Whether a byte ends a bare atom: white space, a parenthesis or a
+// quote.  The end of the input, -1, ends one too.
+fn ends_atom(b: Int) -> Bool
+    b <= 32 or b == '(' or b == ')' or b == '"'
+
+// The next token, or the fault that stops the scan.
+//
+// At the end of the input with no list open the answer is a `TOK_END`
+// token, and the same answer repeats on every later call.  At the end
+// with a list open the answer is `SexprUnclosedList`, naming the
+// innermost one.
+//
+// ```novo
+// use std.bytes
+// use sexprscan
+//
+// fn main() [io]
+//     var sc = sexprscan.scanner(bytes.from_str("(at 1 \"x\")"), 64)
+//     var n = 0
+//     loop
+//         match sexprscan.next(var sc)
+//             Err(e) => println(e.message())
+//             Ok(t)  =>
+//                 if t.kind == sexprscan.TOK_END
+//                     break
+//                 n += 1
+//     println("${n}")   // 5
+// ```
+pub fn next(var sc: SexprScanner) -> Result<SexprToken, sexprerr.SexprFault> []
+    let src = sc.src
+    var i = sc.pos
+    var line = sc.line
+    var line_start = sc.line_start
+    var b = at(src, i)
+    while b >= 0 and b <= 32
+        if b == 10
+            line += 1
+            line_start = i + 1
+        i += 1
+        b = at(src, i)
+    let start = i
+    let start_col = i - line_start + 1
+    if b < 0
+        sc.pos = i
+        sc.line = line
+        sc.line_start = line_start
+        if sc.open > 0
+            return Err(sexprerr.SexprUnclosedList(sc.open_lines[sc.open - 1], sc.open_cols[sc.open - 1]))
+        return Ok(SexprToken { kind: TOK_END, from: i, to: i, line: line, col: start_col })
+    if b == '('
+        if sc.open >= sc.limit
+            return Err(sexprerr.SexprTooDeep(line, start_col, sc.limit))
+        if sc.open < list.len(sc.open_lines)
+            sc.open_lines[sc.open] = line
+            sc.open_cols[sc.open] = start_col
+        else
+            list.push(sc.open_lines, line)
+            list.push(sc.open_cols, start_col)
+        sc.open += 1
+        sc.pos = i + 1
+        sc.line = line
+        sc.line_start = line_start
+        return Ok(SexprToken { kind: TOK_OPEN, from: start, to: i + 1, line: line, col: start_col })
+    if b == ')'
+        if sc.open == 0
+            return Err(sexprerr.SexprUnbalancedClose(line, start_col))
+        sc.open -= 1
+        sc.pos = i + 1
+        sc.line = line
+        sc.line_start = line_start
+        return Ok(SexprToken { kind: TOK_CLOSE, from: start, to: i + 1, line: line, col: start_col })
+    let start_line = line
+    if b == '"'
+        i += 1
+        var closed = false
+        while not closed
+            b = at(src, i)
+            if b < 0
+                return Err(sexprerr.SexprUnterminatedString(start_line, start_col))
+            if b == '"'
+                closed = true
+            elif b == 92
+                // A backslash takes the byte after it, so `\"` does not
+                // close the string.
+                i += 1
+                b = at(src, i)
+                if b < 0
+                    return Err(sexprerr.SexprUnterminatedString(start_line, start_col))
+            if b == 10
+                line += 1
+                line_start = i + 1
+            i += 1
+        sc.pos = i
+        sc.line = line
+        sc.line_start = line_start
+        return Ok(SexprToken { kind: TOK_STRING, from: start, to: i, line: start_line, col: start_col })
+    while not ends_atom(b)
+        i += 1
+        b = at(src, i)
+    sc.pos = i
+    sc.line = line
+    sc.line_start = line_start
+    Ok(SexprToken { kind: TOK_ATOM, from: start, to: i, line: start_line, col: start_col })
+
+// Calls `visit` with every token in order, stopping at the end of the
+// input, at the first fault, or when `visit` answers `false`.
+//
+// `visit` takes the five fields of the token in the order of the
+// struct: kind, from, to, line, col.  A `@value` struct cannot be part
+// of a function value's signature, so the fields arrive unpacked.
+//
+// The answer is the number of tokens handed to `visit`, the one that
+// stopped the walk included.  A scan that `visit` cut short is not a
+// fault; it answers the count so far.  This is the walk
+// for a caller that wants one pass and no tree: a count of footprints, a
+// list of the nets, a bounding box.
+//
+// ```novo
+// use std.bytes
+// use sexprscan
+//
+// fn main() [io]
+//     match sexprscan.walk(bytes.from_str("(a (b) c)"), 64, (k, f, t, l, c) => true)
+//         Ok(n)  => println("${n}")   // 7
+//         Err(e) => println(e.message())
+// ```
+pub fn walk(src: Bytes, max_depth: Int,
+            visit: fn(Int, Int, Int, Int, Int) -> Bool) -> Result<Int, sexprerr.SexprFault> []
+    var sc = scanner(src, max_depth)
+    var n = 0
+    loop
+        match next(var sc)
+            Err(e) =>
+                return Err(e)
+            Ok(t)  =>
+                if t.kind == TOK_END
+                    break
+                n += 1
+                if not visit(t.kind, t.from, t.to, t.line, t.col)
+                    break
+    Ok(n)

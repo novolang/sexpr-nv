@@ -1,0 +1,247 @@
+// sexprwrite — S-expressions out, quoted and indented the way KiCad
+// writes them.
+//
+// A value to write is a `SexprValue`: a list, a bare atom or a string.
+// The caller builds one by hand, or takes one from a parsed tree with
+// `from_tree`, changes what it wants and writes it back.  There are two
+// layouts.
+//
+//   `write`         one line, one space between elements
+//   `write_pretty`  KiCad's layout: a list that holds no list is one
+//                   line; a list that holds lists puts its leading
+//                   atoms on its own line, each later element on a line
+//                   of its own one level deeper, and the closing
+//                   parenthesis on a line at the list's own level
+//
+// A string is written between quotes with `\\` for a backslash, `\"`
+// for a quote, `\n`, `\r` and `\t` for those controls, and `\xHH` for
+// every other byte below 0x20.  A byte from 0x20 up is written as it
+// is, so UTF-8 passes through.
+//
+// An atom whose text cannot stand bare, because it is empty or holds
+// white space, a parenthesis or a quote, is written as a string.  A
+// writer that printed it bare would produce a file that reads back as
+// something else, and no caller wants that.
+//
+// Neither layout ends with a newline.  KiCad's files do; the caller
+// adds one.
+
+use std.str
+use sexprtree
+
+// A value to write.
+//
+// ```novo
+// use sexprwrite
+//
+// fn main() [io]
+//     let v = SxList([SxAtom("at"), SxAtom("1"), SxAtom("2")])
+//     println(sexprwrite.write(v))   // (at 1 2)
+// ```
+pub enum SexprValue
+    // A list of values.
+    SxList(items: [SexprValue])
+    // A bare atom: a name or a number as text.
+    SxAtom(text: Str)
+    // A string, written quoted.
+    SxString(text: Str)
+
+// The value that spells an integer.
+//
+// ```novo
+// use sexprwrite
+//
+// fn main() [io]
+//     println(sexprwrite.write(sexprwrite.int_atom(-7)))   // -7
+// ```
+pub fn int_atom(n: Int) -> SexprValue []
+    SxAtom(str.from_int(n))
+
+// The value that spells a number in its shortest form that reads back
+// as the same `Float`.
+//
+// ```novo
+// use sexprwrite
+//
+// fn main() [io]
+//     println(sexprwrite.write(sexprwrite.float_atom(12.5)))   // 12.5
+// ```
+pub fn float_atom(x: Float) -> SexprValue []
+    SxAtom(str.from_float(x))
+
+// The value of the subtree at node `n`: a list becomes a `SxList`, a
+// bare atom a `SxAtom`, and a quoted string a `SxString` holding the
+// decoded text.
+//
+// ```novo
+// use std.bytes
+// use sexprtree
+// use sexprwrite
+//
+// fn main() [io]
+//     let t = sexprtree.parse(bytes.from_str("(a   \"b c\"  (d))"))!
+//     println(sexprwrite.write(sexprwrite.from_tree(t, 0)))   // (a "b c" (d))
+// ```
+pub fn from_tree(t: sexprtree.SexprTree, n: Int) -> SexprValue []
+    let k = sexprtree.kind_of(t, n)
+    if k == sexprtree.NODE_ATOM
+        SxAtom(sexprtree.text(t, n))
+    elif k == sexprtree.NODE_STRING
+        SxString(sexprtree.text(t, n))
+    else
+        var items: [SexprValue] = []
+        var c = sexprtree.first_child(t, n)
+        while c >= 0
+            list.push(items, from_tree(t, c))
+            c = sexprtree.next_sibling(t, c)
+        SxList(items)
+
+// Whether `s` can be written as a bare atom: it is not empty and holds
+// no white space, parenthesis or quote.
+//
+// ```novo
+// use sexprwrite
+//
+// fn main() [io]
+//     println("${sexprwrite.is_bare("F.Cu")} ${sexprwrite.is_bare("a b")}")   // true false
+// ```
+pub fn is_bare(s: Str) -> Bool []
+    var ok = str.len(s) > 0
+    var i = 0
+    while ok and i < str.len(s)
+        let b = str.byte_at_or(s, i, 0)
+        ok = b > 32 and b != '(' and b != ')' and b != '"'
+        i += 1
+    ok
+
+// The hexadecimal digit of a value from 0 to 15.
+fn hex_char(v: Int) -> Str
+    str.slice("0123456789ABCDEF", v, v + 1)
+
+// `s` between quotes, escaped.
+//
+// ```novo
+// use sexprwrite
+//
+// fn main() [io]
+//     println(sexprwrite.quote("a \"b\"\n"))   // "a \"b\"\n"
+// ```
+pub fn quote(s: Str) -> Str []
+    var parts: [Str] = ["\""]
+    var run = 0
+    let n = str.len(s)
+    for i in 0..n
+        let b = str.byte_at_or(s, i, 0)
+        if b < 32 or b == '"' or b == 92
+            if i > run
+                list.push(parts, str.slice(s, run, i))
+            list.push(parts, escape_of(b))
+            run = i + 1
+    if n > run
+        list.push(parts, str.slice(s, run, n))
+    list.push(parts, "\"")
+    str.join(parts, "")
+
+// The escape sequence for a byte that cannot stand in a string.
+fn escape_of(b: Int) -> Str
+    match b
+        34 => "\\\""
+        92 => "\\\\"
+        10 => "\\n"
+        13 => "\\r"
+        9  => "\\t"
+        _  => "\\x" + hex_char(b / 16) + hex_char(b % 16)
+
+// Whether a value is a list.
+fn is_list(v: SexprValue) -> Bool
+    match v
+        SxList(_) => true
+        _         => false
+
+// Appends the one-line form of `v` to `parts`.
+fn emit_compact(v: SexprValue, var parts: [Str])
+    match v
+        SxList(items)  =>
+            list.push(parts, "(")
+            var first = true
+            for item in items
+                if not first
+                    list.push(parts, " ")
+                first = false
+                emit_compact(item, var parts)
+            list.push(parts, ")")
+        SxAtom(text)   =>
+            if is_bare(text)
+                list.push(parts, text)
+            else
+                list.push(parts, quote(text))
+        SxString(text) => list.push(parts, quote(text))
+
+// Whether any element of a list is itself a list.
+fn holds_list(items: [SexprValue]) -> Bool
+    var found = false
+    for item in items
+        if is_list(item)
+            found = true
+    found
+
+// Appends the indented form of `v`, which sits at `depth` levels, to
+// `parts`.
+fn emit_pretty(v: SexprValue, indent: Str, depth: Int, var parts: [Str])
+    match v
+        SxList(items) =>
+            if not holds_list(items)
+                emit_compact(v, var parts)
+            else
+                list.push(parts, "(")
+                var in_head = true
+                var first = true
+                for item in items
+                    if in_head and is_list(item)
+                        in_head = false
+                    if in_head
+                        if not first
+                            list.push(parts, " ")
+                        emit_compact(item, var parts)
+                    else
+                        list.push(parts, "\n")
+                        list.push(parts, str.repeat(indent, depth + 1))
+                        emit_pretty(item, indent, depth + 1, var parts)
+                    first = false
+                list.push(parts, "\n")
+                list.push(parts, str.repeat(indent, depth))
+                list.push(parts, ")")
+        _             => emit_compact(v, var parts)
+
+// The one-line form of `v`.
+//
+// ```novo
+// use sexprwrite
+//
+// fn main() [io]
+//     let v = SxList([SxAtom("net"), SxAtom("3"), SxString("GND")])
+//     println(sexprwrite.write(v))   // (net 3 "GND")
+// ```
+pub fn write(v: SexprValue) -> Str []
+    var parts: [Str] = []
+    emit_compact(v, var parts)
+    str.join(parts, "")
+
+// The form of `v` in KiCad's layout, indented with `indent` once per
+// level.  KiCad 8 and later indent with one tab.
+//
+// ```novo
+// use sexprwrite
+//
+// fn main() [io]
+//     let at = SxList([SxAtom("at"), SxAtom("1"), SxAtom("2")])
+//     let v = SxList([SxAtom("footprint"), SxString("R"), at])
+//     println(sexprwrite.write_pretty(v, " "))
+//     // (footprint "R"
+//     //  (at 1 2)
+//     // )
+// ```
+pub fn write_pretty(v: SexprValue, indent: Str) -> Str []
+    var parts: [Str] = []
+    emit_pretty(v, indent, 0, var parts)
+    str.join(parts, "")

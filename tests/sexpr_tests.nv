@@ -1,0 +1,345 @@
+// sexpr_tests — the scanner and the tree over forms of the kinds KiCad
+// writes.
+//
+// The fixtures are written for this suite in the shapes the KiCad
+// file-format documentation describes (dev-docs.kicad.org, "S-expression
+// format" and the board, schematic and netlist pages): a `kicad_pcb`
+// root with `version` and `generator`, `footprint` forms with `at`,
+// `layer`, `pad` and `fp_line` children, the `kicadsexpr` netlist
+// `export` with `components` and `nets`, quoted strings, empty strings
+// and numbers in the spellings KiCad prints.
+
+use std.test
+use std.bytes
+use std.str
+use sexprerr
+use sexprscan
+use sexprtree
+
+fn b(s: Str) -> Bytes
+    bytes.from_str(s)
+
+// A tree of `s`, or a failed test and a one-node tree.
+fn tree_of(s: Str) -> sexprtree.SexprTree
+    match sexprtree.parse(b(s))
+        Ok(t)  => t
+        Err(e) =>
+            test.fail(e.message())
+            sexprtree.parse(b("(x)"))!
+
+// A board in the shape KiCad 8 writes.
+fn board() -> Str
+    str.join([
+        "(kicad_pcb\n",
+        "\t(version 20240108)\n",
+        "\t(generator \"pcbnew\")\n",
+        "\t(generator_version \"8.0\")\n",
+        "\t(general\n",
+        "\t\t(thickness 1.6)\n",
+        "\t\t(legacy_teardrops no)\n",
+        "\t)\n",
+        "\t(layers\n",
+        "\t\t(0 \"F.Cu\" signal)\n",
+        "\t\t(31 \"B.Cu\" signal)\n",
+        "\t\t(44 \"Edge.Cuts\" user)\n",
+        "\t)\n",
+        "\t(net 0 \"\")\n",
+        "\t(net 1 \"GND\")\n",
+        "\t(footprint \"Resistor_SMD:R_0603_1608Metric\"\n",
+        "\t\t(layer \"F.Cu\")\n",
+        "\t\t(uuid \"5d5dff1b-1f2e-4b6c-9f3a-0c1d2e3f4a5b\")\n",
+        "\t\t(at 148.59 100.33 90)\n",
+        "\t\t(property \"Reference\" \"R1\"\n",
+        "\t\t\t(at 0 -1.43 90)\n",
+        "\t\t\t(layer \"F.SilkS\")\n",
+        "\t\t\t(effects\n",
+        "\t\t\t\t(font\n",
+        "\t\t\t\t\t(size 1 1)\n",
+        "\t\t\t\t\t(thickness 0.15)\n",
+        "\t\t\t\t)\n",
+        "\t\t\t)\n",
+        "\t\t)\n",
+        "\t\t(attr smd)\n",
+        "\t\t(fp_line\n",
+        "\t\t\t(start -0.237258 -0.5225)\n",
+        "\t\t\t(end 0.237258 -0.5225)\n",
+        "\t\t\t(stroke\n",
+        "\t\t\t\t(width 0.12)\n",
+        "\t\t\t\t(type solid)\n",
+        "\t\t\t)\n",
+        "\t\t\t(layer \"F.SilkS\")\n",
+        "\t\t)\n",
+        "\t\t(pad \"1\" smd roundrect\n",
+        "\t\t\t(at -0.825 0)\n",
+        "\t\t\t(size 0.8 0.95)\n",
+        "\t\t\t(layers \"F.Cu\" \"F.Paste\" \"F.Mask\")\n",
+        "\t\t\t(net 1 \"GND\")\n",
+        "\t\t)\n",
+        "\t\t(pad \"2\" smd roundrect\n",
+        "\t\t\t(at 0.825 0)\n",
+        "\t\t\t(size 0.8 0.95)\n",
+        "\t\t\t(layers \"F.Cu\" \"F.Paste\" \"F.Mask\")\n",
+        "\t\t\t(net 0 \"\")\n",
+        "\t\t)\n",
+        "\t)\n",
+        ")\n"],
+    "")
+
+// ── The scanner ─────────────────────────────────────────────────────
+
+@test
+fn test_the_scanner_answers_the_four_kinds_in_order()
+    var sc = sexprscan.scanner(b("(at 1 \"x y\")"), 8)
+    var kinds: [Int] = []
+    loop
+        match sexprscan.next(var sc)
+            Err(e) => test.fail(e.message())
+            Ok(t)  =>
+                if t.kind == sexprscan.TOK_END
+                    break
+                list.push(kinds, t.kind)
+    test.assert_eq(kinds, [sexprscan.TOK_OPEN,
+        sexprscan.TOK_ATOM,
+        sexprscan.TOK_ATOM,
+        sexprscan.TOK_STRING,
+        sexprscan.TOK_CLOSE])
+
+@test
+fn test_a_token_knows_its_bytes_line_and_column()
+    var sc = sexprscan.scanner(b("(a\n  \"bc\")"), 8)
+    let open = sexprscan.next(var sc)!
+    test.assert_eq(open.from, 0)
+    test.assert_eq(open.to, 1)
+    test.assert_eq(open.line, 1)
+    test.assert_eq(open.col, 1)
+    let atom = sexprscan.next(var sc)!
+    test.assert_eq(atom.from, 1)
+    test.assert_eq(atom.to, 2)
+    test.assert_eq(atom.col, 2)
+    let s = sexprscan.next(var sc)!
+    test.assert_eq(s.kind, sexprscan.TOK_STRING)
+    test.assert_eq(s.from, 5)
+    test.assert_eq(s.to, 9)
+    test.assert_eq(s.line, 2)
+    test.assert_eq(s.col, 3)
+    let close = sexprscan.next(var sc)!
+    test.assert_eq(close.line, 2)
+    test.assert_eq(close.col, 7)
+
+@test
+fn test_the_end_repeats_once_every_list_is_closed()
+    var sc = sexprscan.scanner(b("(a)  \n"), 8)
+    let _ = sexprscan.next(var sc)!
+    let _ = sexprscan.next(var sc)!
+    let _ = sexprscan.next(var sc)!
+    test.assert_eq(sexprscan.depth(sc), 0)
+    let e1 = sexprscan.next(var sc)!
+    let e2 = sexprscan.next(var sc)!
+    test.assert_eq(e1.kind, sexprscan.TOK_END)
+    test.assert_eq(e2.kind, sexprscan.TOK_END)
+    test.assert_eq(e2.line, 2)
+
+@test
+fn test_a_crlf_file_has_the_line_numbers_of_an_lf_file()
+    var sc = sexprscan.scanner(b("(a\r\n b\r\n c)"), 8)
+    let _ = sexprscan.next(var sc)!
+    let _ = sexprscan.next(var sc)!
+    let second = sexprscan.next(var sc)!
+    test.assert_eq(second.line, 2)
+    test.assert_eq(second.col, 2)
+    let third = sexprscan.next(var sc)!
+    test.assert_eq(third.line, 3)
+
+@test
+fn test_a_bare_atom_stops_at_a_parenthesis_or_a_quote()
+    var sc = sexprscan.scanner(b("a(b)c\"d\""), 8)
+    var spans: [Int] = []
+    loop
+        let t = sexprscan.next(var sc)!
+        if t.kind == sexprscan.TOK_END
+            break
+        list.push(spans, t.to - t.from)
+    test.assert_eq(spans, [1, 1, 1, 1, 1, 3])
+
+@test
+fn test_a_hash_is_an_atom_byte_and_not_a_comment()
+    let t = tree_of("(net #PWR01 #00ff00)")
+    test.assert_eq(sexprtree.text(t, 1), "net")
+    test.assert_eq(sexprtree.text(t, 2), "#PWR01")
+    test.assert_eq(sexprtree.text(t, 3), "#00ff00")
+
+@test
+fn test_walk_visits_every_token_and_a_visitor_can_stop_it()
+    match sexprscan.walk(b("(a (b) c)"), 8, (k, f, t, l, c) => true)
+        Ok(n)  => test.assert_eq(n, 7)
+        Err(e) => test.fail(e.message())
+    match sexprscan.walk(b("(a (b) c)"), 8, (k, f, t, l, c) => k != sexprscan.TOK_CLOSE)
+        Ok(n)  => test.assert_eq(n, 5)
+        Err(e) => test.fail(e.message())
+    match sexprscan.walk(b("(a"), 8, (k, f, t, l, c) => true)
+        Ok(_)  => test.fail("the list is never closed")
+        Err(e) => test.assert_eq(sexprerr.code_of(e), "unclosed-list")
+
+@test
+fn test_walk_reads_a_board_without_a_tree()
+    let src = b(board())
+    match sexprscan.walk(src, 64, (k, f, t, l, c) => k == sexprscan.TOK_OPEN)
+        Ok(n)  => test.assert_eq(n, 2)
+        Err(e) => test.fail(e.message())
+    match sexprscan.walk(src, 64, (k, f, t, l, c) => true)
+        Ok(n)  => test.assert_eq(n, 188)
+        Err(e) => test.fail(e.message())
+
+// ── The tree ────────────────────────────────────────────────────────
+
+@test
+fn test_a_tree_has_the_shape_of_the_text()
+    let t = tree_of("(a (b c) \"d\")")
+    test.assert_eq(sexprtree.count(t), 6)
+    test.assert_eq(sexprtree.root(t), 0)
+    test.assert(sexprtree.is_list(t, 0))
+    test.assert(sexprtree.is_atom(t, 1))
+    test.assert(sexprtree.is_list(t, 2))
+    test.assert(sexprtree.is_string(t, 5))
+    test.assert_eq(sexprtree.kind_of(t, 5), sexprtree.NODE_STRING)
+    test.assert_eq(sexprtree.children(t, 0), [1, 2, 5])
+    test.assert_eq(sexprtree.child_count(t, 0), 3)
+    test.assert_eq(sexprtree.child_count(t, 2), 2)
+    test.assert_eq(sexprtree.first_child(t, 2), 3)
+    test.assert_eq(sexprtree.next_sibling(t, 3), 4)
+    test.assert_eq(sexprtree.next_sibling(t, 4), -1)
+    test.assert_eq(sexprtree.first_child(t, 1), -1)
+    test.assert_eq(sexprtree.nth(t, 0, 2), 5)
+    test.assert_eq(sexprtree.nth(t, 0, 3), -1)
+    test.assert_eq(sexprtree.nth(t, 0, -1), -1)
+
+@test
+fn test_every_node_records_where_it_began_and_ended()
+    let t = tree_of("(a\n  (b c)\n  \"d\")")
+    test.assert_eq(sexprtree.where_is(t, 0), "1:1")
+    test.assert_eq(sexprtree.where_is(t, 1), "1:2")
+    test.assert_eq(sexprtree.where_is(t, 2), "2:3")
+    test.assert_eq(sexprtree.where_is(t, 5), "3:3")
+    test.assert_eq(sexprtree.line_of(t, 3), 2)
+    test.assert_eq(sexprtree.col_of(t, 3), 4)
+    test.assert_eq(sexprtree.from_of(t, 2), 5)
+    test.assert_eq(sexprtree.to_of(t, 2), 10)
+    test.assert_eq(sexprtree.to_of(t, 0), 17)
+    test.assert_eq(sexprtree.source_of(t, 2), "(b c)")
+
+@test
+fn test_text_answers_an_atom_as_it_is_and_a_string_decoded()
+    let t = tree_of("(a \"b c\" \"\" \"q\\\"r\")")
+    test.assert_eq(sexprtree.text(t, 1), "a")
+    test.assert_eq(sexprtree.text(t, 2), "b c")
+    test.assert_eq(sexprtree.text(t, 3), "")
+    test.assert_eq(sexprtree.text(t, 4), "q\"r")
+    test.assert_eq(sexprtree.text(t, 0), "")
+    test.assert_eq(sexprtree.source_of(t, 4), "\"q\\\"r\"")
+
+@test
+fn test_a_list_has_a_head_and_is_found_by_it()
+    let t = tree_of("(fp \"R1\" (layer \"F.Cu\") (at 1 2) (pad 1) (pad 2))")
+    test.assert_eq(sexprtree.head(t, 0), "fp")
+    test.assert_eq(sexprtree.head(t, 3), "layer")
+    test.assert_eq(sexprtree.head(t, 1), "")
+    let at = sexprtree.find(t, 0, "at")
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, at, 1)), "1")
+    test.assert_eq(sexprtree.find(t, 0, "size"), -1)
+    test.assert_eq(sexprtree.find_all(t, 0, "pad").len(), 2)
+    test.assert_eq(sexprtree.find_all(t, 0, "none").len(), 0)
+
+@test
+fn test_a_list_whose_first_child_is_a_list_has_no_head()
+    let t = tree_of("((a) b)")
+    test.assert_eq(sexprtree.head(t, 0), "")
+    let e = tree_of("()")
+    test.assert_eq(sexprtree.head(e, 0), "")
+    test.assert_eq(sexprtree.child_count(e, 0), 0)
+
+@test
+fn test_numbers_are_read_from_atoms_and_never_from_strings()
+    let t = tree_of("(at 148.59 -3 \"7\" x 1e-05)")
+    test.assert_eq(sexprtree.as_float(t, 2) ?? 0.0, 148.59)
+    test.assert_eq(sexprtree.as_int(t, 3) ?? 0, -3)
+    test.assert_eq(sexprtree.as_float(t, 3) ?? 0.0, -3.0)
+    test.assert_none(sexprtree.as_int(t, 2))
+    test.assert_none(sexprtree.as_int(t, 4))
+    test.assert_none(sexprtree.as_float(t, 4))
+    test.assert_none(sexprtree.as_int(t, 5))
+    test.assert_eq(sexprtree.as_float(t, 6) ?? 0.0, 0.00001)
+    test.assert_none(sexprtree.as_int(t, 0))
+    test.assert_none(sexprtree.as_float(t, 0))
+
+@test
+fn test_a_board_is_navigated_by_heads()
+    let t = tree_of(board())
+    test.assert_eq(sexprtree.head(t, 0), "kicad_pcb")
+    let version = sexprtree.find(t, 0, "version")
+    test.assert_eq(sexprtree.as_int(t, sexprtree.nth(t, version, 1)) ?? 0, 20240108)
+    let gen = sexprtree.find(t, 0, "generator")
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, gen, 1)), "pcbnew")
+    let fp = sexprtree.find(t, 0, "footprint")
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, fp, 1)), "Resistor_SMD:R_0603_1608Metric")
+    let at = sexprtree.find(t, fp, "at")
+    test.assert_eq(sexprtree.as_float(t, sexprtree.nth(t, at, 1)) ?? 0.0, 148.59)
+    test.assert_eq(sexprtree.as_float(t, sexprtree.nth(t, at, 2)) ?? 0.0, 100.33)
+    test.assert_eq(sexprtree.as_int(t, sexprtree.nth(t, at, 3)) ?? 0, 90)
+    let pads = sexprtree.find_all(t, fp, "pad")
+    test.assert_eq(pads.len(), 2)
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, pads[0], 1)), "1")
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, pads[1], 3)), "roundrect")
+    let nets = sexprtree.find_all(t, 0, "net")
+    test.assert_eq(nets.len(), 2)
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, nets[0], 2)), "")
+    test.assert_eq(sexprtree.where_is(t, fp), "16:2")
+
+// ── A netlist ───────────────────────────────────────────────────────
+
+fn netlist() -> Str
+    str.join([
+        "(export (version \"E\")\n",
+        "  (design\n",
+        "    (source \"/home/user/board.kicad_sch\")\n",
+        "    (date \"2026-11-23T08:00:00+0100\")\n",
+        "    (tool \"Eeschema 8.0.0\")\n",
+        "    (sheet (number \"1\") (name \"/\") (tstamps \"/\")\n",
+        "      (title_block (title \"Air \\\"meter\\\"\") (company) (rev \"A\") (date) (source \"board.kicad_sch\")\n",
+        "        (comment (number \"1\") (value \"\")))))\n",
+        "  (components\n",
+        "    (comp (ref \"R1\")\n",
+        "      (value \"10k\")\n",
+        "      (footprint \"Resistor_SMD:R_0603_1608Metric\")\n",
+        "      (libsource (lib \"Device\") (part \"R\") (description \"Resistor\"))\n",
+        "      (property (name \"Sheetname\") (value \"Root\"))\n",
+        "      (sheetpath (names \"/\") (tstamps \"/\"))\n",
+        "      (tstamps \"00000000-0000-0000-0000-00005c1d2e3f\")))\n",
+        "  (nets\n",
+        "    (net (code \"1\") (name \"GND\")\n",
+        "      (node (ref \"R1\") (pin \"2\") (pintype \"passive\")))\n",
+        "    (net (code \"2\") (name \"/SDA\")\n",
+        "      (node (ref \"R1\") (pin \"1\") (pintype \"passive\")))))\n"],
+    "")
+
+@test
+fn test_a_netlist_is_read_by_its_heads()
+    let t = tree_of(netlist())
+    test.assert_eq(sexprtree.head(t, 0), "export")
+    let comps = sexprtree.find(t, 0, "components")
+    let comp = sexprtree.find(t, comps, "comp")
+    let ref = sexprtree.find(t, comp, "ref")
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, ref, 1)), "R1")
+    let nets = sexprtree.find(t, 0, "nets")
+    let all = sexprtree.find_all(t, nets, "net")
+    test.assert_eq(all.len(), 2)
+    let name = sexprtree.find(t, all[1], "name")
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, name, 1)), "/SDA")
+    let design = sexprtree.find(t, 0, "design")
+    let sheet = sexprtree.find(t, design, "sheet")
+    let tb = sexprtree.find(t, sheet, "title_block")
+    let title = sexprtree.find(t, tb, "title")
+    test.assert_eq(sexprtree.text(t, sexprtree.nth(t, title, 1)), "Air \"meter\"")
+    // `(company)` and `(date)` are lists with a head and no value.
+    let company = sexprtree.find(t, tb, "company")
+    test.assert_eq(sexprtree.child_count(t, company), 1)
+    test.assert_eq(sexprtree.nth(t, company, 1), -1)
